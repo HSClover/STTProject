@@ -2,8 +2,14 @@ import sys
 import os
 import ctypes
 from ctypes import wintypes
-import threading
-from typing import Any, Optional, List, Tuple
+from typing import Optional, List, Tuple
+import ctypes
+
+try:
+    # 윈도우 COM 스레딩 모델 충돌(RPC_E_CHANGED_MODE)을 방지하기 위한 초기화
+    ctypes.windll.ole32.CoInitializeEx(None, 2) # COINIT_APARTMENTTHREADED = 2
+except Exception:
+    pass
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -22,7 +28,6 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def get_open_windows() -> List[Tuple[str, int]]:
-    """현재 실행 중인 윈도우 창 목록 열거 (제목, PID)"""
     user32 = ctypes.windll.user32
     windows_list: List[Tuple[str, int]] = []
 
@@ -71,13 +76,10 @@ class MainAppWindow(QMainWindow):
 
         self.engine_thread: Optional[VADWhisperEngine] = None
         self.is_running = False
-
         self.completed_lines: List[str] = []
 
         self.init_ui()
-        self.overlay_window = MinimalOverlayWindow(self)
-        self.apply_font_settings()
-        self.refresh_window_list()
+        self.overlay_window = None
 
     def init_ui(self):
         main_widget = QWidget()
@@ -86,7 +88,8 @@ class MainAppWindow(QMainWindow):
 
         # 1. 입력 모드 & 창 선택
         mode_group = QGroupBox("1. 입력 모드 및 대상 창 선택")
-        mode_layout = QHBoxLayout(mode_group)
+        mode_layout = QHBoxLayout()
+        mode_group.setLayout(mode_layout)
 
         self.radio_mic = QRadioButton("마이크 (Microphone)")
         self.radio_audio = QRadioButton("오디오 (스피커/특정 창)")
@@ -120,7 +123,8 @@ class MainAppWindow(QMainWindow):
 
         # 2. 폰트 & 스타일 설정
         config_group = QGroupBox("2. 폰트 및 스타일 설정")
-        config_layout = QHBoxLayout(config_group)
+        config_layout = QHBoxLayout()
+        config_group.setLayout(config_layout)
 
         config_layout.addWidget(QLabel("폰트:"))
         self.font_combo = QFontComboBox()
@@ -148,7 +152,8 @@ class MainAppWindow(QMainWindow):
 
         # 3. 제어 버튼 패널
         btn_group = QGroupBox("제어 (Controls)")
-        btn_layout = QHBoxLayout(btn_group)
+        btn_layout = QHBoxLayout()
+        btn_group.setLayout(btn_layout)
 
         self.btn_toggle_start = QPushButton("자막 시작 (Start)")
         self.btn_toggle_start.setStyleSheet("font-size: 14px; font-weight: bold; padding: 6px;")
@@ -169,17 +174,19 @@ class MainAppWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         trans_group = QGroupBox("실시간 자막 (Transcription)")
-        trans_layout = QVBoxLayout(trans_group)
+        trans_layout = QVBoxLayout()
+        trans_group.setLayout(trans_layout)
         self.trans_text = QTextEdit()
         self.trans_text.setReadOnly(True)
         trans_layout.addWidget(self.trans_text)
         splitter.addWidget(trans_group)
 
         log_group = QGroupBox("로그 (Logs)")
-        log_layout = QVBoxLayout(log_group)
+        log_layout = QVBoxLayout()
+        log_group.setLayout(log_layout)
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        log_layout.addWidget(log_group)
+        log_layout.addWidget(self.log_text)
         splitter.addWidget(log_group)
 
         main_layout.addWidget(splitter)
@@ -214,28 +221,26 @@ class MainAppWindow(QMainWindow):
     def apply_audio_mode(self):
         self.active_mode = "mic" if self.radio_mic.isChecked() else "audio"
         self.active_target_pid = self.window_combo.currentData() if self.active_mode == "audio" else None
-
         target_str = "마이크" if self.active_mode == "mic" else f"오디오 루프백 [{self.window_combo.currentText()}]"
         self.emitter.log_received.emit(f"[설정 적용] 입력 소스: {target_str}")
-
-        if self.is_running:
-            self.toggle_start()
-            threading.Timer(0.5, self.toggle_start).start()
 
     def apply_font_settings(self):
         selected_font = self.font_combo.currentFont()
         font_size = self.font_size_spin.value()
         selected_font.setPointSize(font_size)
-
         self.trans_text.setFont(selected_font)
 
-        if hasattr(self, "overlay_window"):
+        if self.overlay_window:
             overlay_font = QFont(selected_font)
             overlay_font.setPointSize(font_size + 3)
             self.overlay_window.update_font(overlay_font)
             self._render_view()
 
     def toggle_overlay(self):
+        if not self.overlay_window:
+            self.overlay_window = MinimalOverlayWindow(self)
+            self.apply_font_settings()
+
         if self.overlay_window.isVisible():
             self.overlay_window.hide()
             self.btn_toggle_overlay.setText("Show Overlay")
@@ -246,12 +251,14 @@ class MainAppWindow(QMainWindow):
     def clear_subtitles(self):
         self.completed_lines = []
         self.trans_text.clear()
-        self.overlay_window.update_overlay_text([])
+        if self.overlay_window:
+            self.overlay_window.update_overlay_text([])
 
     def _render_view(self):
         self.trans_text.setPlainText("\n".join(self.completed_lines))
         self.trans_text.moveCursor(QTextCursor.MoveOperation.End)
-        self.overlay_window.update_overlay_text(self.completed_lines)
+        if self.overlay_window and self.overlay_window.isVisible():
+            self.overlay_window.update_overlay_text(self.completed_lines)
 
     def on_subtitle_received(self, text: str):
         if text.strip():
@@ -294,11 +301,11 @@ class MainAppWindow(QMainWindow):
         self.btn_toggle_start.setText("자막 시작 (Start)")
         self.btn_toggle_start.setStyleSheet("font-size: 14px; font-weight: bold; padding: 6px;")
 
-    def closeEvent(self, a0: Any):
-        if hasattr(self, "overlay_window"):
+    def closeEvent(self, a0):
+        if self.overlay_window:
             try:
                 self.overlay_window.close()
-            except Exception:
+            except:
                 pass
         self.stop_engine()
         if a0:
